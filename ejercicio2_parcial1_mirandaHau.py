@@ -1,86 +1,66 @@
-from Crypto.PublicKey import RSA
-from Crypto.Signature import pkcs1_15
-from Crypto.Hash import SHA256
-from PyPDF2 import PdfReader, PdfWriter
-from PyPDF2.generic import NameObject, create_string_object
-import os
+import Crypto.Random
+import Crypto.Util.number
+import hashlib
 
-# Paso 1: Generar claves RSA para Alice y la AC con e = 65537 (4to número de Fermat)
-def generate_keys():
-    key = RSA.generate(1024, e=65537)  # 1024 bits y e=65537
-    private_key = key.export_key()
-    public_key = key.publickey().export_key()
-    return private_key, public_key
+# Para e vamos a usar el número 4 de Fermat
+e = 65537
 
-alice_private, alice_public = generate_keys()
-ac_private, ac_public = generate_keys()
+# Paso 1: Generación manual de las claves RSA de Alice y la AC
+def generate_keypair():
+    p = Crypto.Util.number.getPrime(1024, randfunc=Crypto.Random.get_random_bytes)
+    q = Crypto.Util.number.getPrime(1024, randfunc=Crypto.Random.get_random_bytes)
+    n = p * q
+    phi = (p - 1) * (q - 1)
+    d = Crypto.Util.number.inverse(e, phi)
+    return n, d
 
-# Guardar claves en archivos
-keys = {"alice_private.pem": alice_private, "alice_public.pem": alice_public,
-        "ac_private.pem": ac_private, "ac_public.pem": ac_public}
-for filename, key in keys.items():
-    with open(filename, "wb") as f:
-        f.write(key)
+# Claves de Alice
+nA, dA = generate_keypair()
+print("\nRSA de Alice: n =", nA)
+print("Clave privada de Alice: d =", dA)
 
-# Paso 2: Calcular hash del PDF en bloques
-def hash_document(filename):
-    try:
-        hash_obj = SHA256.new()
-        with open(filename, "rb") as f:
-            while chunk := f.read(4096):  # Leer en bloques de 4 KB
-                hash_obj.update(chunk)
-        return hash_obj
-    except FileNotFoundError:
-        print("Error: No se encontró el archivo PDF.")
-        exit(1)
+# Claves de la AC
+nAc, dAc = generate_keypair()
+print("\nRSA de la AC: n =", nAc)
+print("Clave privada de la AC: d =", dAc)
 
-hash_obj = hash_document("NDA.pdf")
+# Paso 2: Leer el archivo NDA.pdf y calcular el hash
+nda = 'NDA.pdf'
+
+try:
+    with open(nda, 'rb') as file:
+        file_content = file.read()
+
+    print(f'\nMensaje: {nda}')
+except FileNotFoundError:
+    print(f'\nError: No se encontró el archivo {nda}')
+    exit(1)
+
+# Calcular el hash del documento
+hM = int.from_bytes(hashlib.sha256(file_content).digest(), byteorder='big')
+print('\nMensaje hasheado:', hex(hM))
 
 # Paso 3: Alice firma el hash con su clave privada
-def sign_hash(hash_obj, private_key):
-    key = RSA.import_key(private_key)
-    signature = pkcs1_15.new(key).sign(hash_obj)
-    return signature
+sA = pow(hM, dA, nA)  # Firma el hash de manera manual usando RSA
+print('\nFirma de Alice:', sA)
 
-alice_signature = sign_hash(hash_obj, alice_private)
+# Paso 4: La AC verifica la firma de Alice usando la clave pública de Alice
+hM1 = pow(sA, e, nA)  # Verificación usando la fórmula pública
+print('\nLa AC verifica el hash:', hex(hM1))
 
-# Paso 4: Agregar la firma de Alice al PDF en los metadatos
-reader = PdfReader("NDA.pdf")
-writer = PdfWriter()
-for page in reader.pages:
-    writer.add_page(page)
+if hM == hM1:
+    print("\nFirma de Alice validada. Mandando a la AC...")
+else:
+    print("Error: Los hashes no coinciden.")
+    exit(1)
 
-metadata = reader.metadata
-metadata[NameObject("/AliceSignature")] = create_string_object(alice_signature.hex())  # Usamos NameObject para las claves y create_string_object para los valores
-writer.add_metadata(metadata)
-with open("NDA_signed_by_Alice.pdf", "wb") as f:
-    writer.write(f)
+# Paso 5: La AC firma el hash con su clave privada
+sAc = pow(hM, dAc, nAc)  # Firma el hash de manera manual usando la clave privada de la AC
+print('\nFirma de la AC:', sAc)
 
-# Paso 5: AC verifica la firma de Alice
-def verify_signature(hash_obj, signature, public_key):
-    key = RSA.import_key(public_key)
-    try:
-        pkcs1_15.new(key).verify(hash_obj, signature)
-        return True
-    except (ValueError, TypeError):
-        return False
+# Paso 6: Bob verifica la firma de la AC usando la clave pública de la AC
+hM2 = pow(sAc, e, nAc)  # Verificación usando la fórmula pública de la AC
+print('\nBob verifica la firma de la AC:', hex(hM2))
 
-alice_signature_valid = verify_signature(hash_obj, alice_signature, alice_public)
-print("Firma de Alice válida:", alice_signature_valid)
-
-# Paso 6: La AC firma el documento con su clave privada
-ac_signature = sign_hash(hash_obj, ac_private)
-
-# Paso 7: Agregar la firma de la AC al PDF en los metadatos
-metadata[NameObject("/ACSignature")] = create_string_object(ac_signature.hex())  # Usamos NameObject para las claves y create_string_object para los valores
-writer.add_metadata(metadata)
-with open("NDA_signed_by_AC.pdf", "wb") as f:
-    writer.write(f)
-
-# Simulando la verificación de Bob de la firma de la AC
-ac_signature_valid_bob = verify_signature(hash_obj, ac_signature, ac_public)
-print("Firma de la AC válida para Bob:", ac_signature_valid_bob)
-
-# Paso 8: Bob verifica la firma de la AC
-ac_signature_valid = verify_signature(hash_obj, ac_signature, ac_public)
-print("Firma de la AC válida:", ac_signature_valid)
+# Verificar que Bob ha recibido correctamente el mensaje firmado por la AC
+print("\nBob recibió correctamente el mensaje firmado por la AC:", (hM1 == hM2))
